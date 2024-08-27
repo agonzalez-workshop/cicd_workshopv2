@@ -30,13 +30,13 @@ export class MyPipelineStack extends cdk.Stack {
     pipeline.addStage({
       stageName: 'Source',
       actions: [
-        new codepipeline_actions.GitHubSourceAction({
-          actionName: 'GitHub_Source',
+        new codepipeline_actions.CodeStarConnectionsSourceAction({
+          actionName: 'CheckOut',
           owner: 'agonzalez-workshop', // Nombre de la organización
           repo: 'cicd_workshopv2',
-          branch: 'main', // o la rama que prefieras
-          oauthToken: githubSecret.secretValue,
           output: sourceOutput,
+          branch: 'main', // o la rama que prefieras
+          connectionArn: "arn:aws:secretsmanager:us-east-1:928159460500:secret:github/personal_access_token2-zKRk0G"
         }),
       ],
     });

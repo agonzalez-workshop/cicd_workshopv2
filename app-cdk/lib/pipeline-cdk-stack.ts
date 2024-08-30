@@ -1,23 +1,44 @@
-import { CfnOutput, Stack, StackProps } from 'aws-cdk-lib';
 import * as cdk from 'aws-cdk-lib';
 import * as codepipeline from 'aws-cdk-lib/aws-codepipeline';
 import * as codepipeline_actions from 'aws-cdk-lib/aws-codepipeline-actions';
 import * as codebuild from 'aws-cdk-lib/aws-codebuild';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
+import { CfnOutput, Stack, StackProps, Duration } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as ecsPatterns from 'aws-cdk-lib/aws-ecs-patterns';
+import * as codedeploy from 'aws-cdk-lib/aws-codedeploy';
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
+import { Rule, EventPattern } from 'aws-cdk-lib/aws-events';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as cloudWatch from 'aws-cdk-lib/aws-cloudwatch-actions';
+
+
 
 import { Construct } from 'constructs';
 
 interface ConsumerProps extends StackProps {
   ecrRepository: ecr.Repository,
+  fargateServiceTest: ecsPatterns.ApplicationLoadBalancedFargateService,
+  //fargateServiceProd: ecsPatterns.ApplicationLoadBalancedFargateService,
+  greenTargetGroup: elbv2.ApplicationTargetGroup,
+  greenLoadBalancerListener: elbv2.ApplicationListener,
+  fargateServiceProd: ecsPatterns.ApplicationLoadBalancedFargateService,
 }
+
 export class MyPipelineStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: ConsumerProps) {
+  constructor(scope: Construct, id: string, props: ConsumerProps) {
     super(scope, id, props);
 
     // Recupera el secreto de GitHub
-    const githubSecret = secretsmanager.Secret.fromSecretNameV2(this, 'GitHubSecret', 'github/personal_access_token2');
+    const githubSecret = secretsmanager.Secret.fromSecretNameV2(this, 'GitHubSecret', 'github/personal_access_token');
 
     // Crea un proyecto de CodeBuild
     const buildProject = new codebuild.PipelineProject(this, 'BuildProject', {
@@ -29,9 +50,9 @@ export class MyPipelineStack extends cdk.Stack {
       buildSpec: codebuild.BuildSpec.fromSourceFilename('buildspec.yml'),
     });
 
-        // Define los artefactos
+    // Define los artefactos
     const sourceOutput = new codepipeline.Artifact();
-    const buildOutPut = new codepipeline.Artifact();
+    const buildOutput = new codepipeline.Artifact();
     const unitTestOutput = new codepipeline.Artifact();
 
     // Define el pipeline
@@ -43,7 +64,7 @@ export class MyPipelineStack extends cdk.Stack {
     const dockerBuild = new codebuild.PipelineProject(this, 'DockerBuild', {
       environmentVariables: {
         IMAGE_TAG: { value: 'latest' },
-        IMAGE_REPO_URI: { value: props?.ecrRepository.repositoryUri },
+        IMAGE_REPO_URI: { value: props.ecrRepository.repositoryUri },
         AWS_DEFAULT_REGION: { value: process.env.CDK_DEFAULT_REGION },
       },
       environment: {
@@ -77,6 +98,30 @@ export class MyPipelineStack extends cdk.Stack {
 
     const dockerBuildOutput = new codepipeline.Artifact();
 
+    const signerARNParameter = new ssm.StringParameter(this, 'SignerARNParam', {
+      parameterName: 'signer-profile-arn',
+      stringValue: 'arn:aws:signer:us-east-1:928159460500:/signing-profiles/ecr_signing_profile',
+    });
+
+    const signerParameterPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      resources: [signerARNParameter.parameterArn],
+      actions: ['ssm:GetParametersByPath', 'ssm:GetParameters'],
+    });
+
+    const signerPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      resources: ['*'],
+      actions: [
+        'signer:PutSigningProfile',
+        'signer:SignPayload',
+        'signer:GetRevocationStatus',
+      ],
+    });
+
+    dockerBuild.addToRolePolicy(signerParameterPolicy);
+    dockerBuild.addToRolePolicy(signerPolicy);
+
     // Agrega la etapa de origen con GitHub
     pipeline.addStage({
       stageName: 'Source',
@@ -92,7 +137,8 @@ export class MyPipelineStack extends cdk.Stack {
       ],
     });
 
-    // Agrega la etapa de construcción :)
+    
+    //Agrega la etapa de testing
     pipeline.addStage({
       stageName: 'Code-Quality-Testing',
       actions: [
@@ -104,6 +150,7 @@ export class MyPipelineStack extends cdk.Stack {
         }),
       ],
     });
+
     pipeline.addStage({
       stageName: 'Docker-Push-ECR',
       actions: [
@@ -114,6 +161,17 @@ export class MyPipelineStack extends cdk.Stack {
           outputs: [dockerBuildOutput],
         }),
       ],
+    });
+  
+    pipeline.addStage({
+      stageName: 'Deploy-Test',
+      actions: [
+        new codepipeline_actions.EcsDeployAction({
+          actionName: 'Deploy-Fargate-Test',
+          service: props.fargateServiceTest.service,
+          input: dockerBuildOutput,
+        }),
+      ]
     });
   }
 }
